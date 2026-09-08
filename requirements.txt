@@ -1,0 +1,7 @@
+# MiniMax-H3-PDD-Acc Python Dependencies
+# These are all included in standard ComfyUI portable builds.
+# Listed here for standalone / non-portable environments.
+
+torch>=2.0.0
+safetensors>=0.4.0
+numpy>=1.24.0

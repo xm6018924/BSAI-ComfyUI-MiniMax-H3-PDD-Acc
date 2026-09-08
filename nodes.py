@@ -22,11 +22,15 @@ from types import SimpleNamespace
 import torch
 
 import comfy.lora
-import comfy.nested_tensor
 import comfy.patcher_extension
 import comfy.utils
 import folder_paths
 
+from ._compat import (
+    check_audio_mechanics,
+    get_nested_tensor_class,
+    get_wrappers_mp,
+)
 from .pdd_acc_core import (
     AUDIO_SHIFT,
     VIDEO_SHIFT,
@@ -76,16 +80,7 @@ def _check_core_supported():
     rework (#15243): heads emit mean block velocities and rely on core's
     carried-variable audio mapping — the older stock-world mechanics would
     silently mis-integrate audio."""
-    try:
-        from comfy.ldm.minimax.model import MiniMaxH3Model
-        src = inspect.getsource(MiniMaxH3Model.forward)
-    except Exception:
-        return  # can't probe (source unavailable) — don't block on that alone
-    if "audio_scale" not in src:
-        raise RuntimeError(
-            "MiniMaxH3PDDAccApply: this ComfyUI predates the MiniMax-H3 audio-mechanics rework "
-            "(comfyanonymous/ComfyUI#15243), so the PDD heads would mis-integrate audio. "
-            "Update ComfyUI to v0.33.0 or newer.")
+    check_audio_mechanics()
 
 
 def make_wrapper(holder):
@@ -223,7 +218,7 @@ class MiniMaxH3PDDAccApply:
             "head_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
                                         "tooltip": "PDD head blend: native + s*(pdd - native). "
                                                    "1.0 = trained path (native head not evaluated)."}),
-            "on_off_grid": (["error", "clamp"],
+            "on_off_grid": (["raise", "clamp"],
                             {"default": "error",
                              "tooltip": "What to do when the model is evaluated at a sigma that is "
                                         "not a trained block boundary (wrong sampler/scheduler)."}),
@@ -242,7 +237,7 @@ class MiniMaxH3PDDAccApply:
             "bypass_sigmas": ("SIGMAS", {"tooltip": "Returned as the sigmas output when "
                                                     "enabled=False (e.g. a BasicScheduler for the "
                                                     "base model). Ignored when enabled."}),
-            "partition_check": (["error", "warn", "off"],
+            "partition_check": (["strict", "warn", "off"],
                                 {"default": "error",
                                  "tooltip": "fl2va and ref2va share identical key sets, so an "
                                             "FL2VA file on a ref2va UNET (or vice versa) applies "
@@ -266,7 +261,7 @@ class MiniMaxH3PDDAccApply:
                    "SigmaShift 12/3. Remove other distill LoRAs (turbo) and cache nodes.")
 
     def apply(self, model, pdd_file, nfe, lora_strength, head_strength, on_off_grid, partition="",
-              enabled=True, bypass_sigmas=None, partition_check="error"):
+              enabled=True, bypass_sigmas=None, partition_check="strict"):
         if not enabled:
             if bypass_sigmas is None:
                 raise ValueError(
@@ -277,6 +272,11 @@ class MiniMaxH3PDDAccApply:
                     "PDD Acc BYPASSED (enabled=False): model and bypass_sigmas passed through "
                     "unchanged. Remember the un-distilled recipe (CFG, sampler, steps) differs "
                     "from the PDD one.")
+        # backward compat: old workflows saved 'error' as the widget value
+        if on_off_grid == 'error':
+            on_off_grid = 'raise'
+        if partition_check == 'error':
+            partition_check = 'strict'
         _check_core_supported()
         nfe = int(nfe)
         path = folder_paths.get_full_path_or_raise("pdd_acc", pdd_file)
@@ -353,8 +353,8 @@ class MiniMaxH3PDDAccApply:
         m.add_object_patch(
             "diffusion_model.final_layer.forward",
             make_pdd_final_forward(final_layer, heads, holder, bounds, on_off_grid, head_strength))
-        m.remove_wrappers_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY)
-        m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY,
+        m.remove_wrappers_with_key(get_wrappers_mp().DIFFUSION_MODEL, WRAPPER_KEY)
+        m.add_wrapper_with_key(get_wrappers_mp().DIFFUSION_MODEL, WRAPPER_KEY,
                                make_wrapper(holder))
 
         sigmas = _sigmas_tensor(bounds)
@@ -494,7 +494,7 @@ class MiniMaxH3AVLatentUpscaleBy:
         vid = vid.reshape(b, t, c, nh, nw).movedim(1, 2)
         s = samples.copy()
         s.pop("noise_mask", None)   # sized for the old resolution
-        s["samples"] = comfy.nested_tensor.NestedTensor((vid, audio))
+        s["samples"] = get_nested_tensor_class()((vid, audio))
         return (s,)
 
 

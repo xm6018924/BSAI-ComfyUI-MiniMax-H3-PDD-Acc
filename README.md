@@ -28,6 +28,30 @@ Either release works — the loader auto-detects the format:
 Pair **FL2VA** with an fl2va UNET and **Ref2VA** with a ref2va UNET (bf16 originals or int8
 convrot builds both work — LoRA application goes through ComfyUI's quant-aware patch path).
 
+## BSAI 优化版说明
+
+本版本在原版基础上做了以下优化，提升独立性和用户体验：
+
+### 1. 选项显示名优化（避免误判为报错）
+- `on_off_grid`：选项从 `["error", "clamp"]` 改为 `["raise", "clamp"]`，默认值 `raise`
+- `partition_check`：选项从 `["error", "warn", "off"]` 改为 `["strict", "warn", "off"]`，默认值 `strict`
+- **完全向后兼容**：旧工作流中保存的 `error` 值会自动转换为 `raise`/`strict`，无需手动修改
+
+### 2. 版本兼容层（_compat.py）
+- 新增 `_compat.py` 模块，集中管理所有 ComfyUI 核心版本依赖
+- 所有对 `comfy.nested_tensor.NestedTensor`、`comfy.patcher_extension.WrappersMP` 的直接引用已替换为兼容层函数
+- 版本不兼容时给出清晰的错误提示，而不是深层 AttributeError
+- 最低要求：ComfyUI >= 0.33.0（MiniMax-H3 carried-audio rework）
+
+### 3. 依赖声明
+- 新增 `requirements.txt`，明确 Python 依赖（torch、safetensors、numpy）
+- 所有依赖均为 ComfyUI 便携版自带，非便携环境可参考安装
+
+### 4. 无外部自定义插件依赖
+- 本插件**不依赖任何其他 ComfyUI 自定义插件**，仅依赖 ComfyUI 核心 + PyTorch + safetensors
+- `pdd_acc_core.py` 为纯 torch 实现，可独立于 ComfyUI 使用
+
+
 **ComfyUI version:** v0.33.0 or newer (the MiniMax-H3 carried-audio mechanics,
 comfyanonymous/ComfyUI#15243 — the node fails closed with an update message on older cores).
 Both pre- and post-#15375 cores work; the final-layer patch delegates to your core's own

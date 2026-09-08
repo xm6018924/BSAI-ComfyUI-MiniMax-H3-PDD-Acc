@@ -135,7 +135,7 @@ def select_block(sigma, bounds, on_off_grid):
             return b
     if abs(sigma - bounds[-1]) <= KNOT_TOLERANCE:
         return nfe - 1
-    if on_off_grid == "error":
+    if on_off_grid in ("error", "raise"):
         pretty = ", ".join(f"{s:.6f}" for s in bounds)
         raise ValueError(
             f"MiniMaxH3PDDAccApply: model evaluated at sigma {sigma:.6f}, which is not a trained "
@@ -526,7 +526,7 @@ def identify_trunk(video_out_weight, fingerprints, tol=PARTITION_TOLERANCE):
 
 
 def check_partition_pairing(video_out_weight, fingerprints, file_partition,
-                            pdd_file, mode="error"):
+                            pdd_file, mode="strict"):
     """Refuse (or warn about) a PDD file applied to the other trunk's model.
 
     Returns a note string for the info output. Raises ValueError only when BOTH
@@ -551,7 +551,7 @@ def check_partition_pairing(video_out_weight, fingerprints, file_partition,
                f"The key sets are identical, so this would apply cleanly and render silently "
                f"wrong — pair FL2VA with an fl2va UNET, Ref2VA with ref2va. If this pairing "
                f"is a deliberate experiment, set partition_check to 'warn'.")
-        if mode == "error":
+        if mode in ("error", "strict"):
             raise ValueError(f"MiniMaxH3PDDAccApply: {msg}")
         return f"partition MISMATCH (continuing, partition_check=warn): {msg}"
     return f"partition check ok: {file_partition} file on {model_partition} model ({dtxt})"
