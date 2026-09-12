@@ -293,3 +293,110 @@ the real safetensors headers.
 - Base model: [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3).
 
 This pack: Apache-2.0.
+
+
+---
+
+## 中文完整说明 / Chinese Full Guide
+
+### 插件介绍 / What This Is
+
+为 **MiniMax-H3 官方 8 步 PDD 加速 LoRA**（[alibaba-pai/MiniMax-H3-Acc-LoRAs](https://huggingface.co/alibaba-pai/MiniMax-H3-Acc-LoRAs)）提供 ComfyUI 原生支持——**8（或 4）步采样即可生成完整 音视频，无需 CFG**。
+
+这些文件不是普通 LoRA：除了 rank-64 主干 LoRA，还带一个**并行解码蒸馏（PDD）头组**——32 份每间隔一份的最终层视频/音频投影副本，在每个采样步融合为一个平均块速度头（[PDD, Shaul et al. 2026](https://arxiv.org/abs/2607.26004)）。普通 LoRA 加载器读不了它们，丢掉头组会静默丢失蒸馏效果；本插件完整加载。
+
+### 安装 / Install
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/xm6018924/BSAI-ComfyUI-MiniMax-H3-PDD-Acc
+```
+
+把 PDD 文件放入 `ComfyUI/models/pdd_acc/`（首次启动自动创建）。两种版本均可，加载器自动识别格式：
+
+| 来源 | 文件 |
+|---|---|
+| 原版 (alibaba-pai) | [MiniMax-H3-Acc-LoRAs](https://huggingface.co/alibaba-pai/MiniMax-H3-Acc-LoRAs)：`MiniMax-H3-FL2VA-Acc-8Step.safetensors`、`MiniMax-H3-Ref2VA-Acc-8Step.safetensors` |
+| ComfyUI 预转换 | [aptech0081/MiniMax-H3-Acc-LoRAs-ComfyUI](https://huggingface.co/aptech0081/MiniMax-H3-Acc-LoRAs-ComfyUI)：`minimax_h3_fl2va_pdd_acc_8step_comfyui.safetensors`、`minimax_h3_ref2va_pdd_acc_8step_comfyui.safetensors` |
+
+**FL2VA 配 fl2va UNET，Ref2VA 配 ref2va UNET**（bf16 原版或 int8 convrot 均可——LoRA 应用走 ComfyUI 量化感知补丁路径）。
+
+依赖：仅 ComfyUI 核心 + PyTorch + safetensors（`pip install torch safetensors numpy` 或便携版自带），**不依赖任何其他自定义插件**。最低 ComfyUI >= 0.33.0（MiniMax-H3 carried-audio rework）。
+
+### 节点 / Nodes
+
+#### MiniMax H3 PDD Acc LoRA (Apply) — `MiniMaxH3PDDAccApply`
+`MODEL → MODEL + SIGMAS + info`。一个节点完成全部：应用主干 LoRA（原版文件自动在内存中把 diffusers key 转成 ComfyUI 命名）+ 在 `final_layer` 上安装 PDD 头组，**按 sigma 分步武装**——循环/分块采样、resume、拆分 schedule 都不会失同步。
+
+- **nfe**：模型评估次数。`8` = 训练块大小（默认）。`4` = 每步合并两块（官方认可）。`6` = 非均匀默认分区 `8,8,4,4,4,4`（高 sigma 处两块 8 步合并，后期重块保持训练尺寸）。
+- **partition**（可选）：自定义块大小（细步），逗号分隔、合计 32（如 `8,4,4,4,4,4,4` 为 7 步）。覆盖 nfe，sigmas 输出随之变化。
+- **只允许块大小 4 和 8**（训练包络）：头组按 L_min=4 网格上的块起点条件化，包络外的步数会渲染成重度噪点，节点会拒绝而非劣化。
+- **lora_strength / head_strength**：训练于 1.0 / 1.0。
+- **on_off_grid**：`raise`（默认）拒绝非训练块边界的 sigma 并提示；`clamp` 就近取块（画质降级）。
+- **enabled**（可选，默认 true）：`false` = 完全旁路（不加载不补丁），可接线做 A/B 对比。
+
+#### MiniMax H3 PDD Acc Scheduler — `MiniMaxH3PDDAccScheduler`
+独立的 SIGMAS 发射器，用于 partial-denoise / split-sigma 工作流。`denoise 1.0` 时等于 Apply 节点的 sigmas 输出。
+
+### 必需配方 / Required Recipe
+
+| 设置 | 值 | 原因 |
+|---|---|---|
+| Sampler | **euler**（KSamplerSelect） | 每步消耗一个平均块速度；多阶段采样器（er_sde/dpmpp/res_*）会离格评估 |
+| Sigmas | Apply 节点 **sigmas 输出** → SamplerCustomAdvanced | 训练边界 `12t/(1+11t)`，`t = linspace(1,0,nfe+1)` |
+| Guidance | **CFG 1.0**（BasicGuider） | 引导已蒸馏进模型；每步单次前向 |
+| SigmaShift | **12.0 / 3.0** 精确 | 训练网格；否则节点 fail-closed |
+
+**移除**其它蒸馏 LoRA（lightx2v turbo 等）——蒸馏不叠加。角色 LoRA 正常叠加。**不要叠加**步数缓存包（blockcache / EasyCache——final_layer 补丁 fail-closed，8 步蒸馏也没有可缓存的东西）。
+
+### 剪枝模型 / Pruned Checkpoints
+
+剪枝 H3 UNET（Comfy-Org `*_pruned_*` 及其 GGUF/w4a8/nvfp4 重量化）把密集 adaln 换成共享 8 维曲线表——普通加载器会刷 ~50 条 `adaln_proj` 报错并静默丢掉这部分蒸馏。本插件在剪枝模型上把 50 个 adaln LoRA 模块**重基到模型曲线基**（`adaln_basis/` 内置两主干基，自动匹配并警告主干不匹配）；无法精确匹配时**自动重拟合**（float64 最小二乘），残差同主干级 ~1e-5 才接受，异主干 ~1e-1 拒绝。被拒即非已知主干的重打包——用 `bake_adaln_basis.py` 烘焙或开 issue。
+
+**混合主干（fl2va+ref2va 块合并）**：只带 BASE 主干的单条 adaln 表；配对会警告主干不匹配（PDD 仍完整应用），但混合对 PDD 属 off-label，画质未验证，建议先用纯主干 A/B。
+
+### 示例工作流 / Example Workflows
+
+- `example_workflows/pdd_acc_t2v_basic.json` — 8 步文生视频+音频（Ref2VA 主干、零参考图；把图接到 `ref_image_0…` 即锁身份 r2v）。拖入 ComfyUI 即用。
+- `example_workflows/pdd_acc_t2v_warmup_split.json` — 两阶段 warmup 提升参考相似度：Warmup Scheduler 的 sigmas 在 `phase2_start_step` 用 `SplitSigmas` 拆分；第一遍用未蒸馏 BASE 模型采样 warmup 段，第二遍把输出 latent（经 `DisableNoise`）链入 PDD 补丁模型跑训练尾段。
+- `example_workflows/pdd_acc_t2v_latent_upscale.json` — 两遍潜空间放大（hi-res fix）：896×512 全 8 步 PDD 渲染 → `MiniMax H3 AV Latent Upscale By` ×1.5（正好落在模型原生 1344×768）→ `PDD Acc Scheduler` 以 `denoise 0.25` 只重跑最后 2 个训练块（resume sigma 0.8）。音频来自第一遍解码、精修不动。
+- `example_workflows/pdd_video_upscale_long.json` — **任意长度已有视频放大**（video-to-video hi-res fix）：按路径加载 → VAE 编码 → 神经潜放大到 1344×768 → PDD partial-denoise 精修（`denoise 0.25`），73 帧窗口 + 22 帧重叠 + anchor 帧采样，70s 素材约 25 个廉价窗口完成；源音频直通。需要 [Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler)（LBH-123-AI）与 [VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)。用 mamad 转换版 PDD 时：Apply 与 Scheduler 都设 nfe 4。
+
+### 转换器（可选）/ Converter
+
+```bash
+python3 convert_pdd_acc.py MiniMax-H3-FL2VA-Acc-8Step.safetensors \
+    minimax_h3_fl2va_pdd_acc_8step_comfyui.safetensors
+```
+输出与加载器内存计算逐位一致，含完整溯源元数据。
+
+### 烘焙主干（可选，显存吃紧时）/ Baking the Trunk
+
+ComfyUI 只在加载时把 LoRA 合并进权重——**装不下的模块每步都重新应用补丁**（低分辨率下固定成本大，实测 32GB RTX 5090 在 864×480 约 2× s/it）。**模型能完全加载时烘焙无收益**。`bake_pdd_trunk.py` 把主干 LoRA（剪枝基上先曲线重基）+ adaln 更新离线合并进量化权重，头组仍运行时（不可烘焙）。烘焙后用普通 UNETLoader 加载，Apply 节点 `lora_strength` 设 **0.0**（烘焙主干模式）。GGUF 与非 convrot 格式拒绝（不猜）。先跑 `--check` 审计。
+
+### 原理（简版）/ How It Works
+
+- **LoRA 转换**：`to_q/to_k/to_v` 融合进 `attn.qkv_proj`（拼接 `lora_A`、块对角 `lora_B`、alpha ×3）；`ff.net.0.proj → mlp.fc1` 带 SwiGLU `[value;gate] → [gate;value]` 半交换；`to_out.0 → attn.out_proj`、`ff.net.2 → mlp.fc2`、`adaln_proj.linear` 1:1；`token_refiner.refiner_blocks → token_refiner.blocks`。
+- **头组**：按块计划（细步大小按 shift-12 视频 / shift-3 音频网格逐模态归一）在加载时把 32 头融合成 `nfe` 个 fp32 头——与官方 `minimax_h3_pdd.py` einsum 数学一致。
+- **音频**：当前 ComfyUI 核心无需额外转换——carried-audio 映射在有限 Euler 步上精确积分平均块速度（代数恒等，单测覆盖）。
+
+### 测试 / Tests
+
+```bash
+python3 tests/test_pdd_acc.py          # 仅 torch，无需 ComfyUI
+PDD_ACC_SLOW=1 python3 tests/test_pdd_acc.py   # + 真实文件全张量检查
+```
+13 项测试：网格/计划/融合 vs 官方仓库逐字参考实现、边界 sigmas vs diffusers `set_timesteps`、qkv 块对角 + SwiGLU 交换数值、carried-audio 精确恒等、双格式往返、真实 safetensors 头结构检查。
+
+### 优化版说明（BSAI 分支）
+
+- `on_off_grid` 选项 `["error","clamp"]` → `["raise","clamp"]`（默认 `raise`）；`partition_check` → `["strict","warn","off"]`（默认 `strict`）；旧工作流保存的 `error` 值自动转换，**完全向后兼容**。
+- 新增 `_compat.py` 版本兼容层（ComfyUI 核心版本依赖集中管理），版本不兼容给出清晰提示而非深层 AttributeError。
+- 新增 `requirements.txt` 依赖声明；`pdd_acc_core.py` 纯 torch 实现可独立于 ComfyUI 使用。
+- 主干配对守卫（partition fingerprint）：FL2VA / Ref2VA 张量 key 完全相同，配对错误会"静默画错"；Apply 节点从 `final_layer.video_out.weight` 识别主干（两主干相对 Frobenius 距离 0.0503，容差 0.015），明确不匹配即报错；`partition_check=warn` 可放行跨主干实验。
+
+### 许可证 / License
+
+- 加速 LoRA：[alibaba-pai](https://huggingface.co/alibaba-pai)（Apache-2.0）；`tests/reference_minimax_h3_pdd.py` 为其参考加载器逐字保留作测试 oracle。
+- 方法：[Parallel Decoding Distillation](https://arxiv.org/abs/2607.26004)，Shaul et al.
+- 基座：[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)。本插件 Apache-2.0。
