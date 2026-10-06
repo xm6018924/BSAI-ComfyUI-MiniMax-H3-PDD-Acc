@@ -49,6 +49,26 @@ from .pdd_acc_core import (
     warmup_schedule,
 )
 
+# ==== BSAI 插件协同 SDK：加载即自动注册（失败不拖垮插件） ====
+# 说明：本节点为 PDD Acc LoRA/head-bank 补丁 + sigmas 调度（一次性权重融合），
+# GPU 去噪循环在下游 ComfyUI SamplerCustomAdvanced，本文件无耗时推理循环，仅 register。
+try:
+    import sys as _bsai_sys, os as _bsai_os
+    _BSAI_ORCH_DIR = _bsai_os.path.join(
+        _bsai_os.path.dirname(_bsai_os.path.abspath(__file__)),
+        "..", "BSAI-ComfyUI-Orchestrator")
+    if _bsai_os.path.isdir(_BSAI_ORCH_DIR) and _BSAI_ORCH_DIR not in _bsai_sys.path:
+        _bsai_sys.path.insert(0, _BSAI_ORCH_DIR)
+    from bsai_orch_client import BSAIOrch  # noqa: E402
+    BSAIOrch.register(
+        name="BSAI-MiniMax-H3-PDD-Acc",
+        kind="sampling",
+        hardware=["cuda"],
+    )
+except Exception as _bsai_e:  # 注册失败不得拖垮插件
+    print(f"[BSAI SDK] BSAI-MiniMax-H3-PDD-Acc 注册失败(忽略): {_bsai_e}")
+# ==== BSAI SDK 块结束 ====
+
 WRAPPER_KEY = "minimax_h3_pdd_acc"
 
 _partition_fingerprints = None
